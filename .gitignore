@@ -1,0 +1,4 @@
+*.o
+pbproxy
+*.a
+a.out
