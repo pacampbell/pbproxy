@@ -1,21 +1,23 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
 #include "pbproxy.h"
+#include "encrypt.h"
 #include "debug.h"
 
 static int setupserver(int proxyport);
 static int connectdest(struct sockaddr_in dest);
-static void proxy(int destfd, int inputfd);
-// static void forwardtraffic(int infd, int outfd, bool servermode, struct sockaddr_in server);
+static void proxy(int destfd, int inputfd, CounterState *counter, unsigned char *iv);
 static void pbclient(struct sockaddr_in dest);
-static void pbserver(struct sockaddr_in destination, int proxyport);
+static void pbserver(struct sockaddr_in dest, int proxyport);
 
 int main(int argc, char *argv[]) {
     // int server_sock;
@@ -23,6 +25,7 @@ int main(int argc, char *argv[]) {
     bool servermode = false;
     char *keyfile_path = NULL, *desthostname = NULL, *error = NULL;
     struct sockaddr_in dest;
+    encryption_key key;
 
     while((opt = getopt(argc, argv, "hl:k:")) != -1) {
         switch(opt) {
@@ -50,6 +53,32 @@ int main(int argc, char *argv[]) {
     if (keyfile_path == NULL) {
         error("Please provide a path to the keyfile.\n");
         return EXIT_FAILURE;
+    } else {
+        int keyfd;
+        // See if the keyfile actually exists
+        struct stat st;
+        memset(&st, 0, sizeof(struct stat));
+        if (stat(keyfile_path, &st) < 0) {
+            error("Keyfile %s does not exist\n", keyfile_path);
+            return EXIT_FAILURE;
+        }
+        // Make room to read in the keyfile
+        key.value = malloc(st.st_size);
+        key.size = st.st_size;
+        // Open the keyfile
+        if ((keyfd = open(keyfile_path, 0)) < 0) {
+            error("Failed to open the %s. Perhapps permissions?\n", keyfile_path);
+            return EXIT_FAILURE;
+        }
+        // Read in the contents
+        if (read(keyfd, key.value, key.size) != key.size) {
+            error("An error occurred while trying to read the key file.\n");
+            return EXIT_FAILURE;
+        }
+
+        // Now close the open fd
+        if (keyfd != STDIN_FILENO)
+            close(keyfd);
     }
 
     // Make sure a destination and port is provided
@@ -87,8 +116,13 @@ int main(int argc, char *argv[]) {
 
 static void pbclient(struct sockaddr_in dest) {
     int destfd = connectdest(dest);
+    // Initialize counter
+    unsigned char iv[16];
+    CounterState counter;
+    memset(&counter, 0, sizeof(CounterState));
+    init_counter(&counter, iv);
     // Start being a middle man
-    proxy(destfd, STDIN_FILENO);
+    proxy(destfd, STDIN_FILENO, &counter, iv);
 }
 
 static void pbserver(struct sockaddr_in dest, int proxyport) {
@@ -112,18 +146,24 @@ static void pbserver(struct sockaddr_in dest, int proxyport) {
         int destfd = connectdest(dest);
         debug("Connected to destination: %d\n", destfd);
 
+        // Initialize counter
+        unsigned char iv[16];
+        CounterState counter;
+        memset(&counter, 0, sizeof(CounterState));
+        init_counter(&counter, iv);
+
         // Start being a middle man
-        proxy(destfd, proxyclientfd);
+        proxy(destfd, proxyclientfd, &counter, iv);
     }
 }
 
-static void proxy(int destfd, int inputfd) {
+static void proxy(int destfd, int inputfd, CounterState *counter, unsigned char *iv) {
     int bytesread = 0, bytesent = 0;
-    bool serving = true;
+    bool connected = true;
     fd_set rset;
     char buffer[BUFFER_SIZE];
     // Start relaying traffic
-    while (serving) {
+    while (connected) {
         FD_ZERO(&rset);
         FD_SET(inputfd, &rset);
         FD_SET(destfd, &rset);
@@ -134,15 +174,19 @@ static void proxy(int destfd, int inputfd) {
         // Begin waiting for something to happen
         select(max, &rset, NULL, NULL, NULL);
 
-        // Handle proxy server socket
+        // Handle local socket/fd
         if (FD_ISSET(inputfd, &rset)) {
-            if ((bytesread = recv(inputfd, buffer, BUFFER_SIZE, 0)) == 0) {
+            if ((bytesread = read(inputfd, buffer, BUFFER_SIZE)) == 0) {
                 // Connection closed
                 goto close_connections;
             }
 
+            // Encrypt before writing to destination
+
+
+
             // Forward data to the destination
-            if ((bytesent = send(destfd, buffer, bytesread, 0)) != bytesread) {
+            if ((bytesent = write(destfd, buffer, bytesread)) != bytesread) {
                 // TODO: handle error
                 // EINTER
                 // EPIPE
@@ -152,12 +196,12 @@ static void proxy(int destfd, int inputfd) {
         // Handle destination socket
         if (FD_ISSET(destfd, &rset)) {
             int writeto = (inputfd == STDIN_FILENO) ? STDOUT_FILENO : inputfd;
-            if ((bytesread = recv(destfd, buffer, BUFFER_SIZE, 0)) == 0) {
+            if ((bytesread = read(destfd, buffer, BUFFER_SIZE)) == 0) {
                 // Connection closed
                 goto close_connections;
             }
 
-            if ((bytesent = send(writeto, buffer, bytesread, 0)) != bytesread) {
+            if ((bytesent = write(writeto, buffer, bytesread)) != bytesread) {
                 // TODO: Handle error
                 // EINTER
                 // EPIPE
