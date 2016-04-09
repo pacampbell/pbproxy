@@ -12,8 +12,9 @@
 
 static int setupserver(int proxyport);
 static int connectdest(struct sockaddr_in dest);
+static void proxy(int destfd, int inputfd);
 // static void forwardtraffic(int infd, int outfd, bool servermode, struct sockaddr_in server);
-static void pbclient();
+static void pbclient(struct sockaddr_in dest);
 static void pbserver(struct sockaddr_in destination, int proxyport);
 
 int main(int argc, char *argv[]) {
@@ -79,28 +80,25 @@ int main(int argc, char *argv[]) {
     if (servermode) {
         pbserver(dest, proxy_port);
     } else {
-        pbclient();
+        pbclient(dest);
     }
-
     return EXIT_SUCCESS;
 }
 
-static void pbclient() {
-
+static void pbclient(struct sockaddr_in dest) {
+    int destfd = connectdest(dest);
+    // Start being a middle man
+    proxy(destfd, STDIN_FILENO);
 }
 
 static void pbserver(struct sockaddr_in dest, int proxyport) {
     struct sockaddr_in client;
     int proxyfd = setupserver(proxyport);
-    int proxyclientfd, addrlen = 0, bytesread = 0, bytesent = 0;
+    int proxyclientfd, addrlen = 0;
     bool running = true;
-    fd_set rset;
-    char buffer[BUFFER_SIZE];
 
     // Begin listening for connections
     while(running) {
-        bool serving = true;
-
         // Wait for a connection
         if ((proxyclientfd = accept(proxyfd, (struct sockaddr*)&client, (socklen_t*)&addrlen)) < 0) {
             error("Failed to create a connection with the client\n");
@@ -114,53 +112,63 @@ static void pbserver(struct sockaddr_in dest, int proxyport) {
         int destfd = connectdest(dest);
         debug("Connected to destination: %d\n", destfd);
 
-        // Start relaying traffic
-        while (serving) {
-            FD_ZERO(&rset);
-            FD_SET(proxyclientfd, &rset);
-            FD_SET(destfd, &rset);
+        // Start being a middle man
+        proxy(destfd, proxyclientfd);
+    }
+}
 
-            // Figure out the larger fd
-            int max = proxyclientfd > destfd ? proxyclientfd + 1 : destfd + 1;
+static void proxy(int destfd, int inputfd) {
+    int bytesread = 0, bytesent = 0;
+    bool serving = true;
+    fd_set rset;
+    char buffer[BUFFER_SIZE];
+    // Start relaying traffic
+    while (serving) {
+        FD_ZERO(&rset);
+        FD_SET(inputfd, &rset);
+        FD_SET(destfd, &rset);
 
-            // Begin waiting for something to happen
-            select(max, &rset, NULL, NULL, NULL);
+        // Figure out the larger fd
+        int max = inputfd > destfd ? inputfd + 1 : destfd + 1;
 
-            // Handle proxy server socket
-            if (FD_ISSET(proxyclientfd, &rset)) {
-                if ((bytesread = recv(proxyclientfd, buffer, BUFFER_SIZE, 0)) == 0) {
-                    // Connection closed
-                    goto close_connections;
-                }
+        // Begin waiting for something to happen
+        select(max, &rset, NULL, NULL, NULL);
 
-                // Forward data to the destination
-                if ((bytesent = send(destfd, buffer, bytesread, 0)) != bytesread) {
-                    // TODO: handle error
-                    // EINTER
-                    // EPIPE
-                }
+        // Handle proxy server socket
+        if (FD_ISSET(inputfd, &rset)) {
+            if ((bytesread = recv(inputfd, buffer, BUFFER_SIZE, 0)) == 0) {
+                // Connection closed
+                goto close_connections;
             }
 
-            // Handle destination socket
-            if (FD_ISSET(destfd, &rset)) {
-                if ((bytesread = recv(destfd, buffer, BUFFER_SIZE, 0)) == 0) {
-                    // Connection closed
-                    goto close_connections;
-                }
-
-                // Forward data to the client
-                if ((bytesent = send(proxyclientfd, buffer, bytesread, 0)) != bytesread) {
-                    // TODO: Handle error
-                    // EINTER
-                    // EPIPE
-                }
+            // Forward data to the destination
+            if ((bytesent = send(destfd, buffer, bytesread, 0)) != bytesread) {
+                // TODO: handle error
+                // EINTER
+                // EPIPE
             }
         }
+
+        // Handle destination socket
+        if (FD_ISSET(destfd, &rset)) {
+            int writeto = (inputfd == STDIN_FILENO) ? STDOUT_FILENO : inputfd;
+            if ((bytesread = recv(destfd, buffer, BUFFER_SIZE, 0)) == 0) {
+                // Connection closed
+                goto close_connections;
+            }
+
+            if ((bytesent = send(writeto, buffer, bytesread, 0)) != bytesread) {
+                // TODO: Handle error
+                // EINTER
+                // EPIPE
+            }
+        }
+    }
 close_connections:
         debug("Cleaning up fd's\n");
-        close(proxyclientfd);
+        if (inputfd != STDIN_FILENO)
+            close(inputfd);
         close(destfd);
-    }
 }
 
 static int setupserver(int proxyport) {
