@@ -15,9 +15,9 @@
 
 static int setupserver(int proxyport);
 static int connectdest(struct sockaddr_in dest);
-static void proxy(int destfd, int inputfd, CounterState *counter, unsigned char *iv);
-static void pbclient(struct sockaddr_in dest);
-static void pbserver(struct sockaddr_in dest, int proxyport);
+static void proxy(int destfd, int proxyclient, EncryptionKey *key);
+static void pbclient(struct sockaddr_in dest, EncryptionKey *key);
+static void pbserver(struct sockaddr_in dest, int proxyport, EncryptionKey *key);
 
 int main(int argc, char *argv[]) {
     // int server_sock;
@@ -25,7 +25,7 @@ int main(int argc, char *argv[]) {
     bool servermode = false;
     char *keyfile_path = NULL, *desthostname = NULL, *error = NULL;
     struct sockaddr_in dest;
-    encryption_key key;
+    EncryptionKey key;
 
     while((opt = getopt(argc, argv, "hl:k:")) != -1) {
         switch(opt) {
@@ -107,25 +107,68 @@ int main(int argc, char *argv[]) {
     debug("Proxy Port: %u, destination: %s, port: %u\n", proxy_port, desthostname, port);
 
     if (servermode) {
-        pbserver(dest, proxy_port);
+        pbserver(dest, proxy_port, &key);
     } else {
-        pbclient(dest);
+        pbclient(dest, &key);
     }
     return EXIT_SUCCESS;
 }
 
-static void pbclient(struct sockaddr_in dest) {
+static void pbclient(struct sockaddr_in dest, EncryptionKey *key) {
     int destfd = connectdest(dest);
-    // Initialize counter
-    unsigned char iv[16];
-    CounterState counter;
-    memset(&counter, 0, sizeof(CounterState));
-    init_counter(&counter, iv);
+    unsigned char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
     // Start being a middle man
-    proxy(destfd, STDIN_FILENO, &counter, iv);
+    bool connected = true;
+    fd_set rset;
+    // char buffer[BUFFER_SIZE];
+    // Start relaying traffic
+    while (connected) {
+        FD_ZERO(&rset);
+        FD_SET(STDIN_FILENO, &rset);
+        FD_SET(destfd, &rset);
+
+        // Figure out the larger fd
+        int max = destfd > STDIN_FILENO ? destfd + 1 : STDIN_FILENO + 1;
+
+        // Begin waiting for something to happen
+        select(max, &rset, NULL, NULL, NULL);
+
+        // Handle local socket/fd
+        if (FD_ISSET(STDIN_FILENO, &rset)) {
+            warn("Reading stdin\n");
+            bytes_read = read(STDIN_FILENO, buffer, BUFFER_SIZE);
+            // Encrypt and write data to destination
+            if (write_encrypted(destfd, key, buffer, bytes_read) <= 0) {
+                // TODO: handle error
+                // EINTER
+                // EPIPE
+                connected = false;
+                goto close_connections;
+            }
+        }
+
+        // Handle destination socket
+        if (FD_ISSET(destfd, &rset)) {
+            warn("Reading dest\n");
+            bytes_read = read(destfd, buffer, BUFFER_SIZE);
+            warn("Bytes_read: %ld\n", bytes_read);
+            // Encrypt and write data to destination
+            if (write_decrypted(STDOUT_FILENO, key, buffer, bytes_read) <= 0) {
+                // TODO: handle error
+                // EINTER
+                // EPIPE
+                connected = false;
+                goto close_connections;
+            }
+        }
+    }
+close_connections:
+    debug("Cleaning up fd's\n");
+    close(destfd);
 }
 
-static void pbserver(struct sockaddr_in dest, int proxyport) {
+static void pbserver(struct sockaddr_in dest, int proxyport, EncryptionKey *key) {
     struct sockaddr_in client;
     int proxyfd = setupserver(proxyport);
     int proxyclientfd, addrlen = 0;
@@ -146,72 +189,57 @@ static void pbserver(struct sockaddr_in dest, int proxyport) {
         int destfd = connectdest(dest);
         debug("Connected to destination: %d\n", destfd);
 
-        // Initialize counter
-        unsigned char iv[16];
-        CounterState counter;
-        memset(&counter, 0, sizeof(CounterState));
-        init_counter(&counter, iv);
-
         // Start being a middle man
-        proxy(destfd, proxyclientfd, &counter, iv);
+        proxy(destfd, proxyclientfd, key);
     }
 }
 
-static void proxy(int destfd, int inputfd, CounterState *counter, unsigned char *iv) {
-    int bytesread = 0, bytesent = 0;
+static void proxy(int destfd, int proxyclient, EncryptionKey *key) {
+    unsigned char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
     bool connected = true;
     fd_set rset;
-    char buffer[BUFFER_SIZE];
     // Start relaying traffic
     while (connected) {
         FD_ZERO(&rset);
-        FD_SET(inputfd, &rset);
         FD_SET(destfd, &rset);
+        FD_SET(proxyclient, &rset);
 
         // Figure out the larger fd
-        int max = inputfd > destfd ? inputfd + 1 : destfd + 1;
+        int max = destfd > proxyclient ? destfd + 1 : proxyclient + 1;
 
         // Begin waiting for something to happen
         select(max, &rset, NULL, NULL, NULL);
 
-        // Handle local socket/fd
-        if (FD_ISSET(inputfd, &rset)) {
-            if ((bytesread = read(inputfd, buffer, BUFFER_SIZE)) == 0) {
-                // Connection closed
-                goto close_connections;
-            }
-
-            // Encrypt before writing to destination
-
-
-
-            // Forward data to the destination
-            if ((bytesent = write(destfd, buffer, bytesread)) != bytesread) {
+        // Handle the destination writing to me
+        if (FD_ISSET(destfd, &rset)) {
+            bytes_read = read(destfd, buffer, BUFFER_SIZE);
+            // Encrypt and write data to destination
+            if (write_encrypted(proxyclient, key, buffer, bytes_read) <= 0) {
                 // TODO: handle error
                 // EINTER
                 // EPIPE
+                connected = false;
+                goto close_connections;
             }
         }
 
-        // Handle destination socket
-        if (FD_ISSET(destfd, &rset)) {
-            int writeto = (inputfd == STDIN_FILENO) ? STDOUT_FILENO : inputfd;
-            if ((bytesread = read(destfd, buffer, BUFFER_SIZE)) == 0) {
-                // Connection closed
-                goto close_connections;
-            }
-
-            if ((bytesent = write(writeto, buffer, bytesread)) != bytesread) {
-                // TODO: Handle error
+        // Handle The proxy writing to me
+        if (FD_ISSET(proxyclient, &rset)) {
+            bytes_read = read(proxyclient, buffer, BUFFER_SIZE);
+            // Encrypt and write data to destination
+            if (write_decrypted(destfd, key, buffer, bytes_read) <= 0) {
+                // TODO: handle error
                 // EINTER
                 // EPIPE
+                connected = false;
+                goto close_connections;
             }
         }
     }
 close_connections:
         debug("Cleaning up fd's\n");
-        if (inputfd != STDIN_FILENO)
-            close(inputfd);
+        close(proxyclient);
         close(destfd);
 }
 
