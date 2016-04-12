@@ -27,7 +27,7 @@ void init_counter(CounterState *state, const unsigned char iv[16]) {
     memcpy(state->ivec, iv, AES_BLOCK_SIZE);
 }
 
-ssize_t write_encrypted(int writefd, EncryptionKey *key, CounterState state,
+ssize_t write_encrypted(int writefd, EncryptionKey *key, CounterState *state,
                         unsigned char *buffer, size_t size) {
     ssize_t bytes_written = 0;
     unsigned char *outbuff = malloc(size);
@@ -38,28 +38,28 @@ ssize_t write_encrypted(int writefd, EncryptionKey *key, CounterState state,
     // Encrypt the data
     // info("Encrypt: size: %ld, outsize: %ld\n", size, outsize);
     debug("Encrypt IV: ");
-    prints2h(state.ivec, AES_BLOCK_SIZE);
+    prints2h(state->ivec, AES_BLOCK_SIZE);
     debug("ecount: ");
-    prints2h(state.ecount, AES_BLOCK_SIZE);
-    debug("num: %u\n", state.num);
-    AES_ctr128_encrypt(buffer, outbuff, size, &(key->aeskey), state.ivec,
-                       state.ecount, &state.num);
+    prints2h(state->ecount, AES_BLOCK_SIZE);
+    debug("num: %u\n", state->num);
+    AES_ctr128_encrypt(buffer, outbuff, size, &(key->aeskey), state->ivec,
+                       state->ecount, &(state->num));
     // memcpy(outbuff, buffer, size);
 
     // Write the buffer to the socket
     if ((bytes_written = write(writefd, outbuff, size)) != size) {
         // TODO: Something bad happened
-        perror("");
+        // perror("");
         goto cleanup;
     }
 
-    debug("Encrypt: Total_bytes_written: %ld\n\n", bytes_written);
+    // debug("Encrypt: Total_bytes_written: %ld\n\n", bytes_written);
 cleanup:
     free(outbuff);
     return bytes_written;
 }
 
-ssize_t write_decrypted(int writefd, EncryptionKey *key, CounterState state,
+ssize_t write_decrypted(int writefd, EncryptionKey *key, CounterState *state,
                         unsigned char *buffer, size_t size) {
     ssize_t bytes_written = 0;
     unsigned char *outbuff = malloc(size);
@@ -70,22 +70,22 @@ ssize_t write_decrypted(int writefd, EncryptionKey *key, CounterState state,
     // Decrypt the contents of the buffer
     // info("Decrypt: size: %ld, outsize: %ld\n", size - AES_BLOCK_SIZE, outsize);
     debug("Decrypt IV: ");
-    prints2h(state.ivec, AES_BLOCK_SIZE);
+    prints2h(state->ivec, AES_BLOCK_SIZE);
     debug("ecount: ");
-    prints2h(state.ecount, AES_BLOCK_SIZE);
-    debug("num: %u\n", state.num);
-    AES_ctr128_encrypt(buffer, outbuff, size, &(key->aeskey), state.ivec,
-                       state.ecount, &state.num);
+    prints2h(state->ecount, AES_BLOCK_SIZE);
+    debug("num: %u\n", state->num);
+    AES_ctr128_encrypt(buffer, outbuff, size, &(key->aeskey), state->ivec,
+                       state->ecount, &(state->num));
     // memcpy(outbuff, buffer, size);
     // Write the buffer to the socket
     if ((bytes_written = write(writefd, outbuff, size)) != size) {
         error("bytes_witten: %ld, outsize: %ld\n", bytes_written, size);
         // TODO: Something bad happened
-        perror("");
+        // perror("");
         goto cleanup;
     }
 
-    debug("Decrypt: Total_bytes_written: %ld\n\n", bytes_written);
+    // debug("Decrypt: Total_bytes_written: %ld\n\n", bytes_written);
 cleanup:
     free(outbuff);
     return bytes_written;

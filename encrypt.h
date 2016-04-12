@@ -23,8 +23,8 @@ void prints2h(const unsigned char *value, size_t size);
 
 void init_counter(CounterState *state, const unsigned char iv[16]);
 
-ssize_t write_encrypted(int writefd, EncryptionKey *key, CounterState state,
+ssize_t write_encrypted(int writefd, EncryptionKey *key, CounterState *state,
                         unsigned char *buffer, size_t size);
-ssize_t write_decrypted(int writefd, EncryptionKey *key, CounterState state,
+ssize_t write_decrypted(int writefd, EncryptionKey *key, CounterState *state,
                         unsigned char *buffer, size_t size);
 #endif

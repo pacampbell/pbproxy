@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Werror
+CFLAGS = -Wall -Werror -DCOLOR
 BIN = pbproxy
 LIBS = -lcrypto -lssl
 SRC = $(wildcard *.c)

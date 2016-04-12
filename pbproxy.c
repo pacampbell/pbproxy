@@ -16,7 +16,7 @@
 
 static int setupserver(int proxyport);
 static int connectdest(struct sockaddr_in dest);
-static void proxy(int infd, int dstfd, EncryptionKey *key, CounterState instate, CounterState outstate);
+static void proxy(int infd, int dstfd, EncryptionKey *key, CounterState *instate, CounterState *outstate);
 static void pbclient(struct sockaddr_in dest, EncryptionKey *key);
 static void pbserver(struct sockaddr_in dest, int proxyport, EncryptionKey *key);
 
@@ -42,10 +42,10 @@ int main(int argc, char *argv[]) {
                 keyfile_path = optarg;
                 break;
             case 'h':
-                // TODO: PRINT HELP MENU
+                HELP();
                 return EXIT_SUCCESS;
             default: /* ? */
-                // TODO: PRINT HELP MENU
+                HELP();
                 return EXIT_FAILURE;
         }
     }
@@ -110,8 +110,6 @@ int main(int argc, char *argv[]) {
     dest.sin_family = AF_INET;
     dest.sin_port = htons(port);
 
-    debug("Proxy Port: %u, destination: %s, port: %u\n", proxy_port, desthostname, port);
-
     if (servermode) {
         pbserver(dest, proxy_port, &key);
     } else {
@@ -146,17 +144,17 @@ static void pbclient(struct sockaddr_in dest, EncryptionKey *key) {
     // Wait for the server IV
     read(destfd, serveriv, AES_BLOCK_SIZE);
 
-    debug("Client IV: ");
-    prints2h(clientiv, AES_BLOCK_SIZE);
-    debug("Server IV: ");
-    prints2h(serveriv, AES_BLOCK_SIZE);
+    // debug("Client IV: ");
+    // prints2h(clientiv, AES_BLOCK_SIZE);
+    // debug("Server IV: ");
+    // prints2h(serveriv, AES_BLOCK_SIZE);
 
     // Initialize both states
     init_counter(&clientstate, clientiv);
     init_counter(&serverstate, serveriv);
 
     // Start the proxy
-    proxy(STDIN_FILENO, destfd, key, clientstate, serverstate);
+    proxy(STDIN_FILENO, destfd, key, &clientstate, &serverstate);
 }
 
 static void pbserver(struct sockaddr_in dest, int proxyport, EncryptionKey *key) {
@@ -170,10 +168,10 @@ static void pbserver(struct sockaddr_in dest, int proxyport, EncryptionKey *key)
         // Wait for a connection
         if ((proxyclientfd = accept(proxyfd, (struct sockaddr*)&client, (socklen_t*)&addrlen)) < 0) {
             error("Failed to create a connection with the client\n");
-            perror("");
+            // perror("");
             continue;
         }
-        debug("Accepted a new connection: %d\n", proxyclientfd);
+        // debug("Accepted a new connection: %d\n", proxyclientfd);
 
         // Create memory to store IV
         CounterState clientstate, serverstate;
@@ -197,29 +195,30 @@ static void pbserver(struct sockaddr_in dest, int proxyport, EncryptionKey *key)
         write(proxyclientfd, serveriv, AES_BLOCK_SIZE);
 
         // Look for the IV packet
-        debug("Waiting to receive the iv...\n");
+        // debug("Waiting to receive the iv...\n");
         read(proxyclientfd, clientiv, AES_BLOCK_SIZE);
-        debug("Received the iv...\n");
+        // debug("Received the iv...\n");
 
         // Now that we have a client, open a connection to the destination
         int destfd = connectdest(dest);
-        debug("Connected to destination: %d\n", destfd);
+        // debug("Connected to destination: %d\n", destfd);
 
         // Initialize both states
-        debug("Client IV: ");
+        // debug("Client IV: ");
         prints2h(clientiv, AES_BLOCK_SIZE);
-        debug("Server IV: ");
+        // debug("Server IV: ");
         prints2h(serveriv, AES_BLOCK_SIZE);
 
         init_counter(&clientstate, clientiv);
         init_counter(&serverstate, serveriv);
 
         // Start being a middle man
-        proxy(destfd, proxyclientfd, key, serverstate, clientstate);
+        proxy(destfd, proxyclientfd, key, &serverstate, &clientstate);
     }
 }
 
-static void proxy(int infd, int dstfd, EncryptionKey *key, CounterState instate, CounterState outstate) {
+static void proxy(int infd, int dstfd, EncryptionKey *key,
+                  CounterState *instate, CounterState *outstate) {
     unsigned char buffer[BUFFER_SIZE];
     ssize_t bytes_read, bytes_written;
     bool connected = true;
@@ -236,7 +235,7 @@ static void proxy(int infd, int dstfd, EncryptionKey *key, CounterState instate,
         // Begin waiting for something to happen
         if (select(max, &rset, NULL, NULL, NULL) < 0) {
             error("select failed\n");
-            perror("");
+            // perror("");
             connected = false;
             goto close_connections;
         }
@@ -244,9 +243,9 @@ static void proxy(int infd, int dstfd, EncryptionKey *key, CounterState instate,
         // Handle the encrypted fd being written to
         if (FD_ISSET(infd, &rset)) {
             if ((bytes_read = read(infd, buffer, BUFFER_SIZE)) < 1) {
-                debug("Bytes_read: %ld\n", bytes_read);
+                // debug("Bytes_read: %ld\n", bytes_read);
                 if (bytes_read < 0) {
-                    perror("Error: ");
+                    // perror("Error: ");
                     connected = false;
                     goto close_connections;
                 } else {
@@ -259,7 +258,7 @@ static void proxy(int infd, int dstfd, EncryptionKey *key, CounterState instate,
                 // TODO: handle error
                 // EINTER
                 // EPIPE
-                perror("");
+                // perror("");
                 error("Write decrypted failed: %ld\n", bytes_written);
                 connected = false;
                 goto close_connections;
@@ -269,8 +268,8 @@ static void proxy(int infd, int dstfd, EncryptionKey *key, CounterState instate,
         // Handle The proxy writing to me
         if (FD_ISSET(dstfd, &rset)) {
             if ((bytes_read = read(dstfd, buffer, BUFFER_SIZE)) < 1) {
-                debug("Bytes_read: %ld\n", bytes_read);
-                perror("");
+                // debug("Bytes_read: %ld\n", bytes_read);
+                // perror("");
                 connected = false;
                 goto close_connections;
             }
@@ -280,7 +279,7 @@ static void proxy(int infd, int dstfd, EncryptionKey *key, CounterState instate,
                 // TODO: handle error
                 // EINTER
                 // EPIPE
-                perror("");
+                // perror("");
                 error("Write decrypted failed: %ld\n", bytes_written);
                 connected = false;
                 goto close_connections;
@@ -299,7 +298,7 @@ static int setupserver(int proxyport) {
     int server_sock;
 
     if ((server_sock = socket(AF_INET , SOCK_STREAM , 0)) < 0) {
-        perror("Failed to open socket");
+        // perror("Failed to open socket");
         return -1;
     }
 
@@ -313,7 +312,7 @@ static int setupserver(int proxyport) {
 
     // Create the server socket
     if(bind(server_sock, (struct sockaddr*)&server, sizeof(server)) < 0) {
-        perror("Failed to bind on port.");
+        // perror("Failed to bind on port.");
         return -1;
     }
 
@@ -326,13 +325,13 @@ static int setupserver(int proxyport) {
 static int connectdest(struct sockaddr_in dest) {
     int destfd;
     if ((destfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("");
+        // perror("");
         error("Unable to create a socket\n");
         return -1;
     }
 
     if (connect(destfd, (struct sockaddr *)&dest, sizeof(dest)) < 0) {
-       perror("");
+       // perror("");
        error("Failed to connect\n");
        return -1;
     }
